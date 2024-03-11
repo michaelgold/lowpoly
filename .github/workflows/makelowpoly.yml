@@ -49,6 +49,6 @@ jobs:
       - name: Upload GLB file as an artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bpy-linux
+          name: lowpoly-mesh
           path: |
             ./*.glb

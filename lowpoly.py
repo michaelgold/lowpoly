@@ -52,6 +52,11 @@ def execute(
     enable_3d_printing_addon()
     # Extract values from the scene properties
 
+    # get current script path
+    script_path = Path(__file__).parent
+
+    file_path = str(script_path / file_path)
+
     # Import the file
     if file_path.endswith(".fbx"):
         import_fbx(file_path)

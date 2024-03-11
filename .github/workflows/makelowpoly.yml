@@ -41,7 +41,7 @@ jobs:
 
       - name: Convert to Low Poly
         run: |
-          python lowpoly.py ${{ env.FILENAME }} 
+          python lowpoly.py ${{ env.filename }} 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

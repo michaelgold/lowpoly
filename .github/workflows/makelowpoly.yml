@@ -6,6 +6,10 @@ on:
       filename:
         description: 'Input file to convert to low poly GLB'
         required: true
+      targetfaces:
+        description: 'Target number of faces for the low poly model'
+        required: false
+        default: 7500
 
 jobs:
   build:
@@ -41,7 +45,7 @@ jobs:
 
       - name: Convert to Low Poly
         run: |
-          python lowpoly.py ${{ github.event.inputs.filename }} 
+          python lowpoly.py ${{ github.event.inputs.filename }} --target-faces ${{ github.event.inputs.targetfaces }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

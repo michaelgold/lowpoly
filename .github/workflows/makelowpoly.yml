@@ -1,6 +1,5 @@
 name: Make Low Poly GLB
 
-
 on:
   workflow_dispatch:
     inputs:

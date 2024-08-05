@@ -9,15 +9,12 @@ app = typer.Typer()
 
 
 def enable_3d_printing_addon():
-    # bpy.ops.wm.addon_enable(module="3d_print_tools")
     addon_utils.enable("object_print3d_utils")
 
 
 def set_smooth_shading(obj):
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
-    #        obj.data.polygons.foreach_set('use_smooth',  [True] * len(obj.data.polygons))
-    #        bpy.context.object.data.update()
     bpy.ops.object.shade_smooth()
 
 
@@ -30,7 +27,7 @@ def import_glb(file_path):
 
 
 def import_obj(file_path):
-    bpy.ops.import_scene.obj(filepath=file_path)
+    bpy.ops.wm.obj_import(filepath=file_path)
 
 
 def import_usdz(file_path):
@@ -44,17 +41,18 @@ def execute(
     target_faces: int = 7500,
     texture_resolution: int = 2048,
     multiresolution_levels: int = 3,
+    voxel_size_factor: float = 0.01,
+    voxel_remesh_iterations: int = 1,
+    cleanup_threshold: float = 0.001,
 ):
     # Delete the default cube
     bpy.data.objects["Cube"].select_set(True)
     bpy.ops.object.delete()
 
     enable_3d_printing_addon()
-    # Extract values from the scene properties
 
-    # get current script path
+    # Get current script path
     script_path = Path(__file__).parent
-
     file_path = str(script_path / file_path)
 
     # Import the file
@@ -74,40 +72,96 @@ def execute(
 
     set_smooth_shading(source_object)
 
-    # Duplicate source object
+    # Calculate object height and normalized voxel size
+    bbox = source_object.bound_box
+    object_height = max(vertex[2] for vertex in bbox) - min(
+        vertex[2] for vertex in bbox
+    )
+    normalized_voxel_size = object_height * voxel_size_factor
 
+    print(f"Object height: {object_height}")
+    print(f"Normalized voxel size: {normalized_voxel_size}")
+
+    # Duplicate source object
     bpy.ops.object.select_all(action="DESELECT")
     source_object.select_set(True)
     bpy.context.view_layer.objects.active = source_object
     bpy.ops.object.duplicate()
-    target_object = bpy.context.active_object.id_data
+    target_object = bpy.context.active_object
 
-    # Use 3D-Print addon to make manifold
+    # Use Volume to Mesh to create a manifold mesh
     bpy.ops.object.select_all(action="DESELECT")
     target_object.select_set(True)
-    # Set the 3D view as the active area
-    bpy.context.window.screen.areas[0].type = "VIEW_3D"
     bpy.context.view_layer.objects.active = target_object
 
-    # Check if the active object is a mesh
-    if target_object.type == "MESH":
-        # Set mode to EDIT
-        bpy.ops.object.mode_set(mode="EDIT")
+    # Add a Remesh modifier
+    remesh_modifier = target_object.modifiers.new(name="Remesh", type="REMESH")
+    remesh_modifier.mode = "VOXEL"
+    remesh_modifier.voxel_size = normalized_voxel_size
 
-        # Select all vertices
-        bpy.ops.mesh.select_all(action="SELECT")
+    # Apply the Remesh modifier
+    for _ in range(voxel_remesh_iterations):
+        bpy.ops.object.modifier_apply(modifier="Remesh")
+        if _ < voxel_remesh_iterations - 1:
+            remesh_modifier = target_object.modifiers.new(name="Remesh", type="REMESH")
+            remesh_modifier.mode = "VOXEL"
+            remesh_modifier.voxel_size = normalized_voxel_size
 
-        bpy.ops.mesh.print3d_clean_non_manifold()
+    # Enter edit mode
+    bpy.ops.object.mode_set(mode="EDIT")
 
-        # Set mode back to OBJECT
-        bpy.ops.object.mode_set(mode="OBJECT")
+    # Select all vertices
+    bpy.ops.mesh.select_all(action="SELECT")
+
+    # Recalculate normals to ensure consistency
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+
+    # Merge vertices by distance
+    bpy.ops.mesh.remove_doubles(threshold=cleanup_threshold)
+
+    # Optional: Fill holes
+    bpy.ops.mesh.fill_holes(sides=0)
+
+    # Return to object mode
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Check if the mesh is manifold
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="DESELECT")
+    bpy.ops.mesh.select_non_manifold()
+
+    non_manifold_verts = sum(v.select for v in target_object.data.vertices)
+
+    if non_manifold_verts > 0:
+        print(
+            f"Warning: {non_manifold_verts} non-manifold vertices found after cleanup."
+        )
     else:
-        print("Active object is not a mesh")
+        print("Mesh is manifold.")
 
-    # Use quad remesher (assuming you have this operator from an addon)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Use quad remesher
     bpy.ops.object.quadriflow_remesh(target_faces=target_faces)
 
-    # shade the target mesh smooth
+    # # Convert triangles to quads
+    # bpy.ops.object.mode_set(mode="EDIT")
+    # bpy.ops.mesh.select_all(action="SELECT")
+    # bpy.ops.mesh.tris_convert_to_quads(
+    #     face_threshold=face_angle_limit, shape_threshold=face_angle_limit
+    # )
+    # bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Check the result
+    quad_count = sum(1 for p in target_object.data.polygons if len(p.vertices) == 4)
+    total_faces = len(target_object.data.polygons)
+    quad_percentage = (quad_count / total_faces) * 100 if total_faces > 0 else 0
+
+    print(f"Quad faces: {quad_count}")
+    print(f"Total faces: {total_faces}")
+    print(f"Percentage of quad faces: {quad_percentage:.2f}%")
+
+    # Shade the target mesh smooth
     set_smooth_shading(target_object)
 
     # Smart UV Project with specified island margin
@@ -115,17 +169,14 @@ def execute(
     bpy.ops.object.editmode_toggle()
     bpy.ops.mesh.select_all(action="SELECT")
     bpy.ops.uv.smart_project(island_margin=0.02)
-
     bpy.ops.object.editmode_toggle()
 
     # Add multiresolution modifier and subdivide
     multires = target_object.modifiers.new(name="Multires", type="MULTIRES")
 
-    # subdivide specified number of times
+    # Subdivide specified number of times
     for i in range(multiresolution_levels):
         bpy.ops.object.multires_subdivide(modifier="Multires", mode="CATMULL_CLARK")
-
-    #       bpy.ops.object.modifier_apply({"object": target_object}, modifier=multires.name)
 
     # Add shrinkwrap modifier
     shrinkwrap = target_object.modifiers.new(name="Shrinkwrap", type="SHRINKWRAP")
@@ -166,7 +217,7 @@ def execute(
     target_object.select_set(True)
     bpy.ops.object.modifier_apply(modifier="Shrinkwrap")
 
-    # set render engine to cycles
+    # Set render engine to cycles
     bpy.context.scene.render.engine = "CYCLES"
     bpy.context.scene.cycles.device = "GPU"
 
@@ -203,13 +254,13 @@ def execute(
     print(f"Active node: {new_mat_node_tree.nodes.active}")
     bpy.context.scene.cycles.bake_type = "DIFFUSE"
 
-    # set the render samplese to 2
+    # Set the render samples to 2
     bpy.context.scene.cycles.samples = 2
 
     bpy.ops.object.bake(type="DIFFUSE")
     bpy.ops.image.pack()
 
-    # link nodes
+    # Link nodes
     new_mat_node_tree.links.new(
         diffuse_node.outputs["Color"], bsdf_node.inputs["Base Color"]
     )
@@ -225,12 +276,12 @@ def execute(
     target_object.select_set(True)
     bpy.ops.object.modifier_remove(modifier="Multires")
 
-    # delete high poly source object
+    # Delete high poly source object
     bpy.ops.object.select_all(action="DESELECT")
     source_object.select_set(True)
     bpy.ops.object.delete()
 
-    # export the glb file
+    # Export the glb file
     bpy.ops.export_scene.gltf(
         filepath=Path(file_path).stem + ".glb",
         export_format="GLB",

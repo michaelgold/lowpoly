@@ -34,6 +34,33 @@ def import_usdz(file_path):
     bpy.ops.wm.usd_import(filepath=file_path)
 
 
+def create_vertex_color_material(obj):
+    mat = bpy.data.materials.new(name="VertexColorMaterial")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+
+    # Clear default nodes
+    nodes.clear()
+
+    # Create nodes
+    node_vertex_color = nodes.new(type="ShaderNodeVertexColor")
+    node_bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    node_output = nodes.new(type="ShaderNodeOutputMaterial")
+
+    # Link nodes
+    links.new(node_vertex_color.outputs[0], node_bsdf.inputs["Base Color"])
+    links.new(node_bsdf.outputs[0], node_output.inputs[0])
+
+    # Assign material to object
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+
+    return mat
+
+
 @app.command()
 def execute(
     file_path: str,
@@ -44,10 +71,12 @@ def execute(
     voxel_size_factor: float = 0.01,
     voxel_remesh_iterations: int = 1,
     cleanup_threshold: float = 0.001,
+    keep_vertex_colors: bool = False,
 ):
     # Delete the default cube
-    bpy.data.objects["Cube"].select_set(True)
-    bpy.ops.object.delete()
+    if "Cube" in bpy.data.objects:
+        bpy.data.objects["Cube"].select_set(True)
+        bpy.ops.object.delete()
 
     enable_3d_printing_addon()
 
@@ -144,14 +173,6 @@ def execute(
     # Use quad remesher
     bpy.ops.object.quadriflow_remesh(target_faces=target_faces)
 
-    # # Convert triangles to quads
-    # bpy.ops.object.mode_set(mode="EDIT")
-    # bpy.ops.mesh.select_all(action="SELECT")
-    # bpy.ops.mesh.tris_convert_to_quads(
-    #     face_threshold=face_angle_limit, shape_threshold=face_angle_limit
-    # )
-    # bpy.ops.object.mode_set(mode="OBJECT")
-
     # Check the result
     quad_count = sum(1 for p in target_object.data.polygons if len(p.vertices) == 4)
     total_faces = len(target_object.data.polygons)
@@ -184,92 +205,110 @@ def execute(
     shrinkwrap.wrap_method = "PROJECT"
     shrinkwrap.project_limit = 0.005
 
-    # Duplicate material and create new textures
-    original_mat = target_object.data.materials[0]
-    new_mat = original_mat.copy()
-    target_object.data.materials[0] = new_mat
+    # Check if the object has vertex colors
+    has_vertex_colors = len(target_object.data.vertex_colors) > 0
 
-    # Create new textures
-    number = random.randint(1000, 9999)
-    diffuse_img = bpy.data.images.new(
-        name=f"Diffuse_{number}", width=texture_resolution, height=texture_resolution
-    )
-    normal_img = bpy.data.images.new(
-        name=f"Normals_{number}", width=texture_resolution, height=texture_resolution
-    )
-    print(normal_img)
+    # Check if the object has any materials, if not, create a new one
+    if len(target_object.data.materials) == 0:
+        if has_vertex_colors:
+            new_mat = create_vertex_color_material(target_object)
+        else:
+            new_mat = bpy.data.materials.new(name="New Material")
+            new_mat.use_nodes = True
+            target_object.data.materials.append(new_mat)
+    else:
+        # Duplicate material
+        original_mat = target_object.data.materials[0]
+        new_mat = original_mat.copy()
+        target_object.data.materials[0] = new_mat
 
-    # Add the image texture nodes, connect them, and set them to the newly created images
-    new_mat_node_tree = new_mat.node_tree
-    bsdf_node = [
-        node for node in new_mat_node_tree.nodes if node.type == "BSDF_PRINCIPLED"
-    ][0]
+    # If using vertex colors, we don't need to create and bake textures
+    if not keep_vertex_colors:
+        # Create new textures
+        number = random.randint(1000, 9999)
+        diffuse_img = bpy.data.images.new(
+            name=f"Diffuse_{number}",
+            width=texture_resolution,
+            height=texture_resolution,
+        )
+        normal_img = bpy.data.images.new(
+            name=f"Normals_{number}",
+            width=texture_resolution,
+            height=texture_resolution,
+        )
+        print(normal_img)
 
-    diffuse_node = new_mat_node_tree.nodes.new(type="ShaderNodeTexImage")
-    diffuse_node.image = diffuse_img
+        # Add the image texture nodes, connect them, and set them to the newly created images
+        new_mat_node_tree = new_mat.node_tree
+        bsdf_node = new_mat_node_tree.nodes.get("Principled BSDF")
+        if not bsdf_node:
+            bsdf_node = new_mat_node_tree.nodes.new(type="ShaderNodeBsdfPrincipled")
 
-    normal_node = new_mat_node_tree.nodes.new(type="ShaderNodeTexImage")
-    normal_node.image = normal_img
-    normal_map_node = new_mat_node_tree.nodes.new(type="ShaderNodeNormalMap")
+        diffuse_node = new_mat_node_tree.nodes.new(type="ShaderNodeTexImage")
+        diffuse_node.image = diffuse_img
 
-    # Apply shrinkwrap
-    bpy.ops.object.select_all(action="DESELECT")
-    target_object.select_set(True)
-    bpy.ops.object.modifier_apply(modifier="Shrinkwrap")
+        normal_node = new_mat_node_tree.nodes.new(type="ShaderNodeTexImage")
+        normal_node.image = normal_img
+        normal_map_node = new_mat_node_tree.nodes.new(type="ShaderNodeNormalMap")
 
-    # Set render engine to cycles
-    bpy.context.scene.render.engine = "CYCLES"
-    bpy.context.scene.cycles.device = "GPU"
+        # Apply shrinkwrap
+        bpy.ops.object.select_all(action="DESELECT")
+        target_object.select_set(True)
+        bpy.ops.object.modifier_apply(modifier="Shrinkwrap")
 
-    # Select source and target objects for baking
-    bpy.ops.object.select_all(action="DESELECT")
-    target_object.select_set(True)
-    target_object.modifiers["Multires"].levels = 1
+        # Set render engine to cycles
+        bpy.context.scene.render.engine = "CYCLES"
+        bpy.context.scene.cycles.device = "GPU"
 
-    # Bake normals
-    bpy.context.scene.render.use_bake_multires = True
-    print(new_mat_node_tree)
-    new_mat_node_tree.nodes.active = normal_node
-    print(new_mat_node_tree.nodes.active.image)
-    print(bpy.context.view_layer.objects.active)
-    bpy.context.scene.cycles.bake_type = "NORMAL"
+        # Select source and target objects for baking
+        bpy.ops.object.select_all(action="DESELECT")
+        target_object.select_set(True)
+        target_object.modifiers["Multires"].levels = 1
 
-    normal_node.image.colorspace_settings.name = "Non-Color"
-    bpy.ops.object.bake_image()
-    bpy.ops.image.pack()
+        # Bake normals
+        bpy.context.scene.render.use_bake_multires = True
+        print(new_mat_node_tree)
+        new_mat_node_tree.nodes.active = normal_node
+        print(new_mat_node_tree.nodes.active.image)
+        print(bpy.context.view_layer.objects.active)
+        bpy.context.scene.cycles.bake_type = "NORMAL"
 
-    bpy.ops.object.select_all(action="DESELECT")
-    source_object.select_set(True)
-    target_object.select_set(True)
+        normal_node.image.colorspace_settings.name = "Non-Color"
+        bpy.ops.object.bake_image()
+        bpy.ops.image.pack()
 
-    # Bake diffuse
-    bpy.context.scene.render.bake.use_selected_to_active = True
-    bpy.context.scene.render.bake.use_cage = True
-    bpy.context.scene.render.bake.cage_extrusion = 0.05
-    bpy.context.scene.render.bake.use_pass_direct = False
-    bpy.context.scene.render.bake.use_pass_indirect = False
-    bpy.context.scene.render.bake.use_pass_color = True
-    new_mat_node_tree.nodes.active = diffuse_node
-    print(f"Active image: {new_mat_node_tree.nodes.active.image}")
-    print(f"Active node: {new_mat_node_tree.nodes.active}")
-    bpy.context.scene.cycles.bake_type = "DIFFUSE"
+        bpy.ops.object.select_all(action="DESELECT")
+        source_object.select_set(True)
+        target_object.select_set(True)
 
-    # Set the render samples to 2
-    bpy.context.scene.cycles.samples = 2
+        # Bake diffuse
+        bpy.context.scene.render.bake.use_selected_to_active = True
+        bpy.context.scene.render.bake.use_cage = True
+        bpy.context.scene.render.bake.cage_extrusion = 0.05
+        bpy.context.scene.render.bake.use_pass_direct = False
+        bpy.context.scene.render.bake.use_pass_indirect = False
+        bpy.context.scene.render.bake.use_pass_color = True
+        new_mat_node_tree.nodes.active = diffuse_node
+        print(f"Active image: {new_mat_node_tree.nodes.active.image}")
+        print(f"Active node: {new_mat_node_tree.nodes.active}")
+        bpy.context.scene.cycles.bake_type = "DIFFUSE"
 
-    bpy.ops.object.bake(type="DIFFUSE")
-    bpy.ops.image.pack()
+        # Set the render samples to 2
+        bpy.context.scene.cycles.samples = 2
 
-    # Link nodes
-    new_mat_node_tree.links.new(
-        diffuse_node.outputs["Color"], bsdf_node.inputs["Base Color"]
-    )
-    new_mat_node_tree.links.new(
-        normal_node.outputs["Color"], normal_map_node.inputs["Color"]
-    )
-    new_mat_node_tree.links.new(
-        normal_map_node.outputs["Normal"], bsdf_node.inputs["Normal"]
-    )
+        bpy.ops.object.bake(type="DIFFUSE")
+        bpy.ops.image.pack()
+
+        # Link nodes
+        new_mat_node_tree.links.new(
+            diffuse_node.outputs["Color"], bsdf_node.inputs["Base Color"]
+        )
+        new_mat_node_tree.links.new(
+            normal_node.outputs["Color"], normal_map_node.inputs["Color"]
+        )
+        new_mat_node_tree.links.new(
+            normal_map_node.outputs["Normal"], bsdf_node.inputs["Normal"]
+        )
 
     # Remove multires
     bpy.ops.object.select_all(action="DESELECT")

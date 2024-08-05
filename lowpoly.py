@@ -1,6 +1,6 @@
 import bpy
 import random
-
+import time
 import typer
 from pathlib import Path
 import addon_utils
@@ -61,10 +61,17 @@ def create_vertex_color_material(obj):
     return mat
 
 
+def find_first_mesh():
+    for obj in bpy.context.scene.objects:
+        if obj.type == "MESH":
+            return obj
+    return None
+
+
 @app.command()
 def execute(
     file_path: str,
-    source_object_name: str = "Mesh",
+    source_object_name: str = "",
     target_faces: int = 7500,
     texture_resolution: int = 2048,
     multiresolution_levels: int = 3,
@@ -73,6 +80,8 @@ def execute(
     cleanup_threshold: float = 0.001,
     keep_vertex_colors: bool = False,
 ):
+    start_time = time.time()
+
     # Delete the default cube
     if "Cube" in bpy.data.objects:
         bpy.data.objects["Cube"].select_set(True)
@@ -96,7 +105,16 @@ def execute(
     else:
         raise ValueError("Invalid file format")
 
-    source_object = bpy.data.objects[source_object_name]
+    # If source_object_name is not specified, find the first mesh in the scene
+    if not source_object_name:
+        source_object = find_first_mesh()
+        if not source_object:
+            raise ValueError("No mesh found in the scene")
+        source_object_name = source_object.name
+    else:
+        source_object = bpy.data.objects[source_object_name]
+
+    print(f"Working with mesh: {source_object_name}")
     print(source_object)
 
     set_smooth_shading(source_object)
@@ -210,7 +228,7 @@ def execute(
 
     # Check if the object has any materials, if not, create a new one
     if len(target_object.data.materials) == 0:
-        if has_vertex_colors:
+        if has_vertex_colors and keep_vertex_colors:
             new_mat = create_vertex_color_material(target_object)
         else:
             new_mat = bpy.data.materials.new(name="New Material")
@@ -222,7 +240,7 @@ def execute(
         new_mat = original_mat.copy()
         target_object.data.materials[0] = new_mat
 
-    # If using vertex colors, we don't need to create and bake textures
+    # If not using vertex colors, we need to create and bake textures
     if not keep_vertex_colors:
         # Create new textures
         number = random.randint(1000, 9999)
@@ -327,6 +345,13 @@ def execute(
         export_image_format="AUTO",
         export_draco_mesh_compression_enable=False,
     )
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Total execution time: {execution_time:.2f} seconds")
+
+    # Clean up
+    bpy.ops.wm.read_factory_settings()
 
     return {"FINISHED"}
 
